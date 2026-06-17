@@ -1,0 +1,32 @@
+[project]
+name = "pydantic-ai-openwebui"
+version = "0.1.0"
+description = "Minimal example: a standalone pydantic-ai agent talking to OpenWebUI over the AG-UI protocol."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai-slim[google]>=1.39.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic-settings>=2.5.0",
+    "pillow>=10.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.9.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pydantic_agent_server"
+module-root = "src"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6.0",
+    "pyrefly>=0.44.1",
+]
+
+[tool.pyrefly]
+# Skip the vendored pipe — it imports OpenWebUI internals only present at runtime.
+project-excludes = ["openwebui/**"]
+

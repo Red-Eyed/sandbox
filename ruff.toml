@@ -1,0 +1,5 @@
+line-length = 120
+target-version = "py311"
+
+# Vendored third-party file — kept byte-identical to upstream (see openwebui/README.md).
+extend-exclude = ["openwebui/pipe.py"]

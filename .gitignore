@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Tooling caches
+.ruff_cache/
+.pyrefly_cache/
+
+# Secrets and local runtime state
+.env
+work_dir/
+.webui_secret_key
