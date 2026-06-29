@@ -1,0 +1,46 @@
+[project]
+name = "onnx-speedup"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "ONNX optimization pipeline for Android/ARM deployment"
+
+dependencies = [
+    "onnx>=1.14",
+    "onnxruntime>=1.16",
+    "onnxscript>=0.1",
+    "onnxslim>=0.1",
+    "numpy>=1.24",
+    "pydantic-settings>=2.14.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4",
+    "pyrefly>=0.1",
+]
+
+[project.scripts]
+speedup = "onnx_speedup.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/onnx_speedup"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
