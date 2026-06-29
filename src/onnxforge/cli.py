@@ -12,7 +12,9 @@ from pydantic_settings import BaseSettings, CliApp, CliPositionalArg
 from onnxforge.diagnose import graph_analyzer, profile_analyzer, shape_analyzer
 from onnxforge.passes.base import Pass, PassResult
 from onnxforge.passes.fold_transpose import FoldTransposePass
+from onnxforge.passes.fuse_rms_norm import FuseRMSNormPass
 from onnxforge.passes.fuse_skip_layernorm import FuseSkipLayerNormPass
+from onnxforge.passes.fuse_skip_rms_norm import FuseSkipRMSNormPass
 from onnxforge.passes.onnxslim_pass import OnnxSlimPass
 from onnxforge.passes.ort_offline import OrtOfflinePass
 from onnxforge.passes.pack_projections import PackProjectionsPass
@@ -24,6 +26,8 @@ from onnxforge.verify.parity import check_parity
 __version__ = "0.1.0"
 
 _PASS_PIPELINE: list[Pass] = [
+    FuseRMSNormPass(),  # before onnxslim: opset ≥ 23 only; gamma not yet absorbed
+    FuseSkipRMSNormPass(),  # before onnxslim: any opset; fuses Add+RMSNorm pairs
     OnnxSlimPass(),
     FoldTransposePass(),
     PackProjectionsPass(),  # before ORT: pack QKV/gated-FF so ORT fuses the larger GEMM
@@ -86,6 +90,21 @@ def _run(args: SpeedupArgs) -> int:
     for step, pass_ in enumerate(_PASS_PIPELINE, 1):
         label = f"[{step}/{len(_PASS_PIPELINE)}] {pass_.description}..."
         print(f"{label:<48}", end="", flush=True)
+
+        std_opset = next(
+            (i.version for i in current_model.opset_import if (i.domain or "") == ""),
+            0,
+        )
+        if pass_.min_std_opset > 1 and std_opset < pass_.min_std_opset:
+            result = PassResult(
+                applied=False,
+                description=f"requires opset ≥ {pass_.min_std_opset}, model has {std_opset}",
+                nodes_before=len(current_model.graph.node),
+                nodes_after=len(current_model.graph.node),
+            )
+            print(f"— skipped (opset {std_opset} < {pass_.min_std_opset})")
+            pass_results.append((pass_.name, result))
+            continue
 
         if not pass_.is_applicable(current_model):
             result = PassResult(
