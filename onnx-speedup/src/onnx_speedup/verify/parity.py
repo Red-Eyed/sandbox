@@ -112,6 +112,8 @@ def _generate_inputs(specs: list[dict], seed: int) -> dict[str, np.ndarray]:
             arr = rng.standard_normal(shape).astype(np.float16)
         elif dtype in (TensorProto.INT8, TensorProto.INT32, TensorProto.INT64):
             arr = rng.integers(0, 128, size=shape, dtype=np.int64)
+        elif dtype == TensorProto.BOOL:
+            arr = rng.integers(0, 2, size=shape, dtype=np.bool_)
         else:
             arr = rng.standard_normal(shape).astype(np.float32)
         feeds[spec["name"]] = arr
