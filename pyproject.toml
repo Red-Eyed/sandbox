@@ -1,8 +1,10 @@
 [project]
-name = "onnx-speedup"
+name = "onnxforge"
 version = "0.1.0"
 requires-python = ">=3.11"
-description = "ONNX optimization pipeline for Android/ARM deployment"
+description = "Graph-level ONNX optimization for torch.onnx.export(dynamo=True) models, targeting ARM"
+license = { text = "MIT" }
+readme = "README.md"
 
 dependencies = [
     "onnx>=1.14",
@@ -25,14 +27,14 @@ dev = [
 ]
 
 [project.scripts]
-speedup = "onnx_speedup.cli:main"
+onnxforge = "onnxforge.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/onnx_speedup"]
+packages = ["src/onnxforge"]
 
 [tool.ruff]
 line-length = 100

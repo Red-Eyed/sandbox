@@ -1,4 +1,4 @@
-"""Entry point: uv run python -m build_models [--out work_dir]"""
+"""Entry point: uv run python -m onnxforge.build_models [--out work_dir]"""
 
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ def main(out_dir: Path) -> None:
 
     print(f"\nAll models written to {out_dir}/")
     print("Run the optimizer on any of them:")
-    print(f"  uv run speedup {out_dir}/encoder_ln_dynamic.onnx")
-    print(f"  uv run speedup {out_dir}/bert_tiny.onnx")
-    print(f"  uv run speedup {out_dir}/resnet18.onnx")
+    print(f"  uv run onnxforge {out_dir}/encoder_ln_dynamic.onnx")
+    print(f"  uv run onnxforge {out_dir}/bert_tiny.onnx")
+    print(f"  uv run onnxforge {out_dir}/resnet18.onnx")
 
 
 if __name__ == "__main__":
@@ -31,7 +31,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path(__file__).parent.parent / "work_dir",
+        default=Path.cwd() / "work_dir",
         help="Directory to write .onnx files (default: work_dir/)",
     )
     args = parser.parse_args()

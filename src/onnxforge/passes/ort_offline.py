@@ -4,7 +4,7 @@ import tempfile
 import onnx
 import onnxruntime as ort
 
-from onnx_speedup.passes.base import Pass, PassResult
+from onnxforge.passes.base import Pass, PassResult
 
 
 class OrtOfflinePass(Pass):

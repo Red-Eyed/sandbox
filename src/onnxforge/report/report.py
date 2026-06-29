@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from onnx_speedup.diagnose.graph_analyzer import Finding, GraphAnalysis
-from onnx_speedup.diagnose.profile_analyzer import ProfileAnalysis
-from onnx_speedup.passes.base import PassResult
-from onnx_speedup.verify.parity import ParityResult
+from onnxforge.diagnose.graph_analyzer import Finding, GraphAnalysis
+from onnxforge.diagnose.profile_analyzer import ProfileAnalysis
+from onnxforge.passes.base import PassResult
+from onnxforge.verify.benchmark import BenchResult
+from onnxforge.verify.parity import ParityResult
 
 
 @dataclass
@@ -16,6 +17,8 @@ class PipelineResult:
     graph_after: GraphAnalysis
     parity: ParityResult
     profile: ProfileAnalysis | None = None
+    bench_before: BenchResult | None = None
+    bench_after: BenchResult | None = None
 
 
 def generate(result: PipelineResult, output_path: Path) -> None:
@@ -37,8 +40,15 @@ def _build_report(r: PipelineResult) -> list[str]:
         f"(-{r.graph_before.n_nodes - r.graph_after.n_nodes})",
         f"- Passes applied: {', '.join(n for n, res in r.pass_results if res.applied)}",
         f"- Parity: {'✓' if r.parity.passed else '✗'} max_diff={r.parity.max_diff:.2e}",
-        "",
     ]
+    if r.bench_before and r.bench_after:
+        speedup = r.bench_before.p50_ms / r.bench_after.p50_ms
+        lines.append(
+            f"- Latency (p50, CPUExecutionProvider): "
+            f"{r.bench_before.p50_ms:.2f}ms → {r.bench_after.p50_ms:.2f}ms "
+            f"({speedup:.2f}× speedup)"
+        )
+    lines.append("")
 
     lines += _section_passes(r.pass_results)
     lines += _section_manual_actions(r)

@@ -6,7 +6,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 
-from onnx_speedup.verify.parity import _generate_inputs, _get_input_specs
+from onnxforge.verify.parity import _generate_inputs, _get_input_specs
 
 
 @dataclass

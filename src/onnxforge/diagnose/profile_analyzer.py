@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from onnx_speedup.diagnose.graph_analyzer import Finding
+from onnxforge.diagnose.graph_analyzer import Finding
 
 
 @dataclass

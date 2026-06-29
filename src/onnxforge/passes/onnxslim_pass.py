@@ -1,7 +1,7 @@
 import onnx
 import onnxslim
 
-from onnx_speedup.passes.base import Pass, PassResult
+from onnxforge.passes.base import Pass, PassResult
 
 
 class OnnxSlimPass(Pass):

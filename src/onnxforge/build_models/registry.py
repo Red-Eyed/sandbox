@@ -1,7 +1,7 @@
 """Model registry: lists all SpecProviders in export order.
 
 To add a new model family:
-  1. Create scripts/build_models/specs/<family>.py with a specs() -> list[ExportSpec].
+  1. Create src/onnxforge/build_models/specs/<family>.py with specs() -> list[ExportSpec].
   2. Import it here and add it to _PROVIDERS.
 """
 
