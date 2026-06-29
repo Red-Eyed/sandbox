@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "pytest>=9.0",
     "ruff>=0.4",
+    "pyrefly>=1.0.0",
     # model zoo for building test / demo ONNX files
     "stackformers>=3.9",
     "timm>=1.0",
@@ -42,6 +43,14 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.pyrefly]
+python-version = "3.11"
+# Point at the uv venv so pyrefly finds torch, onnx, and other installed packages
+python-interpreter-path = ".venv/bin/python"
+project-includes = ["src"]
+# Do not infer types from first-use (stricter)
+infer-with-first-use = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

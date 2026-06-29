@@ -5,35 +5,17 @@ import sys
 from pathlib import Path
 
 import onnx
-import onnx.checker
 from pydantic import Field
 from pydantic_settings import BaseSettings, CliApp, CliPositionalArg
 
 from onnxforge.diagnose import graph_analyzer, profile_analyzer, shape_analyzer
+from onnxforge.optimize import OptimizeConfig, OptimizeResult, optimize
 from onnxforge.passes.base import Pass, PassResult
-from onnxforge.passes.fold_transpose import FoldTransposePass
-from onnxforge.passes.fuse_rms_norm import FuseRMSNormPass
-from onnxforge.passes.fuse_skip_layernorm import FuseSkipLayerNormPass
-from onnxforge.passes.fuse_skip_rms_norm import FuseSkipRMSNormPass
-from onnxforge.passes.onnxslim_pass import OnnxSlimPass
-from onnxforge.passes.ort_offline import OrtOfflinePass
-from onnxforge.passes.pack_projections import PackProjectionsPass
 from onnxforge.report.report import PipelineResult
 from onnxforge.report.report import generate as generate_report
 from onnxforge.verify.benchmark import BenchResult, benchmark
-from onnxforge.verify.parity import check_parity
 
 __version__ = "0.1.0"
-
-_PASS_PIPELINE: list[Pass] = [
-    FuseRMSNormPass(),  # before onnxslim: opset ≥ 23 only; gamma not yet absorbed
-    FuseSkipRMSNormPass(),  # before onnxslim: any opset; fuses Add+RMSNorm pairs
-    OnnxSlimPass(),
-    FoldTransposePass(),
-    PackProjectionsPass(),  # before ORT: pack QKV/gated-FF so ORT fuses the larger GEMM
-    OrtOfflinePass(),
-    FuseSkipLayerNormPass(),  # after ORT: mop up residual Add+LN that ORT's fuser skipped
-]
 
 _SEP = "─" * 44
 
@@ -43,6 +25,12 @@ class SpeedupArgs(BaseSettings):
     output: Path | None = Field(
         default=None,
         description="Output .onnx path (default: <model>_optimized.onnx)",
+    )
+    target_opset: int | None = Field(
+        default=None,
+        alias="target-opset",
+        description="Convert the model's standard opset to this version before optimizing "
+        "(guarded by parity; unlocks opset-gated passes like RMSNorm fusion at ≥23)",
     )
     bench: bool = Field(
         default=False,
@@ -62,6 +50,33 @@ class SpeedupArgs(BaseSettings):
         sys.exit(_run(self))
 
 
+class _ConsoleObserver:
+    """Prints pipeline progress to stdout in the onnxforge CLI format.  This is
+    the presentation layer kept out of the optimization core (see optimize.py)."""
+
+    def on_opset_converted(self, source: int, target: int, ok: bool) -> None:
+        if ok:
+            print(f"Opset:   {source} → {target}  ✓")
+        else:
+            print(f"Opset:   {source} → {target}  ✗ (reverted, kept {source})")
+
+    def on_pass_start(self, step: int, total: int, pass_: Pass) -> None:
+        label = f"[{step}/{total}] {pass_.description}..."
+        print(f"{label:<48}", end="", flush=True)
+
+    def on_pass_skipped(self, step: int, pass_: Pass, reason: str) -> None:
+        suffix = "" if reason == "not applicable" else f" ({reason})"
+        print(f"—  skipped{suffix}")
+
+    def on_pass_result(self, step: int, pass_: Pass, result: PassResult) -> None:
+        if result.error:
+            print(f"✗  {result.error}")
+        elif result.applied:
+            print(f"✓  {result.description or ''}")
+        else:
+            print(f"—  {result.description or ''}")
+
+
 def main() -> None:
     CliApp.run(SpeedupArgs)
 
@@ -78,136 +93,33 @@ def _run(args: SpeedupArgs) -> int:
     print(_SEP)
 
     model = onnx.load(str(args.model))
-    graph_before = graph_analyzer.analyze(model)
     shape_info = shape_analyzer.analyze(model)
+    _print_header(args.model, graph_analyzer.analyze(model), shape_info)
 
-    _print_header(args.model, graph_before, shape_info)
-
-    original_model = model
-    pass_results: list[tuple[str, PassResult]] = []
-    current_model = model
-
-    for step, pass_ in enumerate(_PASS_PIPELINE, 1):
-        label = f"[{step}/{len(_PASS_PIPELINE)}] {pass_.description}..."
-        print(f"{label:<48}", end="", flush=True)
-
-        std_opset = next(
-            (i.version for i in current_model.opset_import if (i.domain or "") == ""),
-            0,
-        )
-        if pass_.min_std_opset > 1 and std_opset < pass_.min_std_opset:
-            result = PassResult(
-                applied=False,
-                description=f"requires opset ≥ {pass_.min_std_opset}, model has {std_opset}",
-                nodes_before=len(current_model.graph.node),
-                nodes_after=len(current_model.graph.node),
-            )
-            print(f"— skipped (opset {std_opset} < {pass_.min_std_opset})")
-            pass_results.append((pass_.name, result))
-            continue
-
-        if not pass_.is_applicable(current_model):
-            result = PassResult(
-                applied=False,
-                description="not applicable",
-                nodes_before=len(current_model.graph.node),
-                nodes_after=len(current_model.graph.node),
-            )
-            print("— skipped")
-            pass_results.append((pass_.name, result))
-            continue
-
-        try:
-            new_model, result = pass_.apply(current_model)
-        except Exception as exc:
-            result = PassResult(
-                applied=False,
-                description=str(exc),
-                nodes_before=len(current_model.graph.node),
-                nodes_after=len(current_model.graph.node),
-                error=str(exc),
-            )
-            print(f"✗  ERROR: {exc}")
-            pass_results.append((pass_.name, result))
-            continue
-
-        if result.error:
-            print(f"✗  {result.error}")
-            pass_results.append((pass_.name, result))
-            continue
-
-        try:
-            onnx.checker.check_model(new_model)
-        except Exception as exc:
-            result.applied = False
-            result.error = f"post-pass validation failed: {exc}"
-            print("✗  validation failed, pass skipped")
-            pass_results.append((pass_.name, result))
-            continue
-
-        if result.applied:
-            parity = check_parity(current_model, new_model)
-            if not parity.passed:
-                result.applied = False
-                result.error = (
-                    f"parity check failed (max_diff={parity.max_diff:.2e}, "
-                    f"atol={parity.atol:.2e}): {parity.error or ''}"
-                )
-                print("✗  parity FAIL — pass skipped")
-                pass_results.append((pass_.name, result))
-                continue
-            current_model = new_model
-
-        summary = result.description or ""
-        print(f"✓  {summary}" if result.applied else f"—  {summary}")
-        pass_results.append((pass_.name, result))
+    config = OptimizeConfig(target_opset=args.target_opset)
+    result = optimize(model, config, observer=_ConsoleObserver())
 
     print()
-    final_parity = check_parity(original_model, current_model)
-    parity_mark = "✓" if final_parity.passed else "✗"
+    parity_mark = "✓" if result.parity.passed else "✗"
     print(
-        f"Parity check:  {parity_mark}  max_diff={final_parity.max_diff:.2e}  "
-        f"(atol={final_parity.atol:.2e})"
+        f"Parity check:  {parity_mark}  max_diff={result.parity.max_diff:.2e}  "
+        f"(atol={result.parity.atol:.2e})"
     )
 
-    graph_after = graph_analyzer.analyze(current_model)
+    bench_before, bench_after = _maybe_benchmark(args, model, result.model)
+    profile = _maybe_profile(args)
 
-    bench_before: BenchResult | None = None
-    bench_after: BenchResult | None = None
-    if args.bench:
-        print()
-        print("Benchmarking (CPUExecutionProvider, 10 warmup + 100 runs)...")
-        bench_before = benchmark(original_model, n_warmup=10, n_runs=100)
-        bench_after = benchmark(current_model, n_warmup=10, n_runs=100)
+    _print_summary(result, bench_before, bench_after)
 
-    profile = None
-    if args.profile:
-        try:
-            profile = profile_analyzer.analyze(args.profile)
-        except Exception as exc:
-            print(f"Warning: profile analysis failed: {exc}", file=sys.stderr)
-
-    print()
-    print(_SEP)
-    print(f"Before:  {graph_before.n_nodes} nodes")
-    print(f"After:   {graph_after.n_nodes} nodes  (-{graph_before.n_nodes - graph_after.n_nodes})")
-    if bench_before and bench_after:
-        speedup = bench_before.p50_ms / bench_after.p50_ms
-        print(
-            f"Latency: {bench_before.p50_ms:.2f}ms → {bench_after.p50_ms:.2f}ms  "
-            f"(p50, {speedup:.2f}× speedup)"
-        )
-    print()
-
-    onnx.save(current_model, str(output_path))
+    onnx.save(result.model, str(output_path))
     print(f"Optimized: {output_path}")
 
     pipeline_result = PipelineResult(
         model_name=args.model.name,
-        pass_results=pass_results,
-        graph_before=graph_before,
-        graph_after=graph_after,
-        parity=final_parity,
+        pass_results=result.pass_results,
+        graph_before=result.graph_before,
+        graph_after=result.graph_after,
+        parity=result.parity,
         profile=profile,
         bench_before=bench_before,
         bench_after=bench_after,
@@ -218,6 +130,51 @@ def _run(args: SpeedupArgs) -> int:
 
     _print_manual_actions(pipeline_result)
     return 0
+
+
+def _maybe_benchmark(
+    args: SpeedupArgs,
+    original: onnx.ModelProto,
+    optimized: onnx.ModelProto,
+) -> tuple[BenchResult | None, BenchResult | None]:
+    if not args.bench:
+        return None, None
+    print()
+    print("Benchmarking (CPUExecutionProvider, 10 warmup + 100 runs)...")
+    return (
+        benchmark(original, n_warmup=10, n_runs=100),
+        benchmark(optimized, n_warmup=10, n_runs=100),
+    )
+
+
+def _maybe_profile(args: SpeedupArgs):
+    if not args.profile:
+        return None
+    try:
+        return profile_analyzer.analyze(args.profile)
+    except Exception as exc:
+        print(f"Warning: profile analysis failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _print_summary(
+    result: OptimizeResult,
+    bench_before: BenchResult | None,
+    bench_after: BenchResult | None,
+) -> None:
+    before = result.graph_before.n_nodes
+    after = result.graph_after.n_nodes
+    print()
+    print(_SEP)
+    print(f"Before:  {before} nodes")
+    print(f"After:   {after} nodes  (-{before - after})")
+    if bench_before and bench_after:
+        speedup = bench_before.p50_ms / bench_after.p50_ms
+        print(
+            f"Latency: {bench_before.p50_ms:.2f}ms → {bench_after.p50_ms:.2f}ms  "
+            f"(p50, {speedup:.2f}× speedup)"
+        )
+    print()
 
 
 def _default_output(model_path: Path) -> Path:
