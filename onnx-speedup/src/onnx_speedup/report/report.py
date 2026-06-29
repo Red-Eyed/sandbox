@@ -84,22 +84,9 @@ def _section_manual_actions(r: PipelineResult) -> list[str]:
 
 
 def _collect_all_findings(r: PipelineResult) -> list[Finding]:
-    findings = []
-    findings.extend(r.graph_before.red_flags)
-    findings.extend(r.graph_before.unfused_patterns)
+    findings = list(r.graph_before.findings)
     if r.profile:
         findings.extend(r.profile.flags)
-    # Surface unfused passes as findings
-    for name, res in r.pass_results:
-        if not res.applied and not res.error and res.nodes_before == res.nodes_after:
-            if "not matched" in res.description or "not found" in res.description:
-                findings.append(
-                    Finding(
-                        severity="LOW",
-                        title=f"Pass `{name}` found no patterns",
-                        detail=res.description,
-                    )
-                )
     return sorted(findings, key=lambda f: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[f.severity])
 
 

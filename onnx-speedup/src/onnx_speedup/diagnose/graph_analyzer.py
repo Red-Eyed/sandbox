@@ -2,7 +2,6 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 import onnx
-from onnx import TensorProto
 
 # Standard opset ops we know about — anything else in domain="" is flagged.
 _KNOWN_OPS = {
@@ -169,8 +168,6 @@ _KNOWN_OPS = {
     "Xor",
 }
 
-_LN_CHAIN = {"ReduceMean", "Sub", "Pow", "Add", "Sqrt", "Div", "Mul"}
-
 
 @dataclass
 class Finding:
@@ -188,15 +185,12 @@ class GraphAnalysis:
     op_counts: dict[str, int]
     op_sequence_rle: list[str]
     dynamic_dims: list[str]
-    unfused_patterns: list[Finding]
-    red_flags: list[Finding]
+    findings: list[Finding]
     domain_ops: dict[str, list[str]]
 
 
 def analyze(model: onnx.ModelProto) -> GraphAnalysis:
     graph = model.graph
-    initializer_names = {i.name for i in graph.initializer}
-    output_use_count = _build_output_use_count(graph)
 
     op_counts: dict[str, int] = Counter(n.op_type for n in graph.node)
     domain_ops = _collect_domain_ops(graph)
@@ -204,14 +198,9 @@ def analyze(model: onnx.ModelProto) -> GraphAnalysis:
     dynamic_dims = _find_dynamic_dims(model)
     op_sequence_rle = _run_length_encode([n.op_type for n in graph.node])
 
-    unfused_patterns: list[Finding] = []
-    red_flags: list[Finding] = []
-
-    _check_unfused_gemm(graph, initializer_names, output_use_count, unfused_patterns)
-    _check_decomposed_layernorm(graph, red_flags)
-    _check_redundant_cast(graph, red_flags)
-    _check_layout_thrashing(graph, red_flags)
-    _check_unknown_ops(graph, domain_ops, red_flags)
+    findings: list[Finding] = []
+    _check_layout_thrashing(graph, findings)
+    _check_unknown_ops(graph, domain_ops, findings)
 
     return GraphAnalysis(
         n_nodes=len(graph.node),
@@ -219,19 +208,9 @@ def analyze(model: onnx.ModelProto) -> GraphAnalysis:
         op_counts=dict(op_counts),
         op_sequence_rle=op_sequence_rle,
         dynamic_dims=dynamic_dims,
-        unfused_patterns=unfused_patterns,
-        red_flags=red_flags,
+        findings=findings,
         domain_ops=domain_ops,
     )
-
-
-def _build_output_use_count(graph: onnx.GraphProto) -> dict[str, int]:
-    counts: dict[str, int] = Counter()
-    for node in graph.node:
-        for inp in node.input:
-            if inp:
-                counts[inp] += 1
-    return dict(counts)
 
 
 def _collect_domain_ops(graph: onnx.GraphProto) -> dict[str, list[str]]:
@@ -277,78 +256,6 @@ def _run_length_encode(seq: list[str]) -> list[str]:
             current, count = item, 1
     result.append(f"{current}×{count}" if count > 1 else current)
     return result
-
-
-def _check_unfused_gemm(
-    graph: onnx.GraphProto,
-    initializer_names: set[str],
-    output_use_count: dict[str, int],
-    findings: list[Finding],
-) -> None:
-    matmul_outputs: dict[str, str] = {}  # output_name → node_name
-    for node in graph.node:
-        if node.op_type == "MatMul":
-            if len(node.output) == 1:
-                matmul_outputs[node.output[0]] = node.name or node.op_type
-
-    locations = []
-    for node in graph.node:
-        if node.op_type != "Add":
-            continue
-        for idx, inp in enumerate(node.input):
-            if inp in matmul_outputs and output_use_count.get(inp, 0) == 1:
-                bias_inp = node.input[1 - idx]
-                if bias_inp in initializer_names:
-                    locations.append(matmul_outputs[inp])
-
-    if locations:
-        findings.append(
-            Finding(
-                severity="MEDIUM",
-                title="Unfused MatMul+Add (potential Gemm)",
-                detail=f"Found {len(locations)} MatMul→Add pairs with constant bias. "
-                "fuse_gemm pass will handle these automatically.",
-                locations=locations,
-            )
-        )
-
-
-def _check_decomposed_layernorm(graph: onnx.GraphProto, findings: list[Finding]) -> None:
-    op_types = [n.op_type for n in graph.node]
-    count = sum(1 for op in op_types if op == "ReduceMean")
-    # Heuristic: if ReduceMean, Sub, Pow all appear, LN chain likely present
-    if count > 0 and "Sub" in op_types and "Pow" in op_types and "Sqrt" in op_types:
-        findings.append(
-            Finding(
-                severity="HIGH",
-                title="Decomposed LayerNorm detected",
-                detail=f"Found {count} ReduceMean node(s) with Sub/Pow/Sqrt chain — likely "
-                "torch-decomposed LayerNorm. fuse_layernorm pass will attempt fusion.",
-                guide="docs/layernorm_fusion.md",
-            )
-        )
-
-
-def _check_redundant_cast(graph: onnx.GraphProto, findings: list[Finding]) -> None:
-    float_types = {TensorProto.FLOAT, TensorProto.FLOAT16, TensorProto.BFLOAT16, TensorProto.DOUBLE}
-    locations = []
-    for node in graph.node:
-        if node.op_type != "Cast":
-            continue
-        to_attr = next((a for a in node.attribute if a.name == "to"), None)
-        if to_attr and to_attr.i in float_types:
-            locations.append(node.name or "Cast")
-
-    if locations:
-        findings.append(
-            Finding(
-                severity="LOW",
-                title="Possible redundant Cast nodes (float-width only)",
-                detail=f"{len(locations)} Cast node(s) change only float width. "
-                "eliminate_cast pass will verify and remove unnecessary ones.",
-                locations=locations,
-            )
-        )
 
 
 def _check_layout_thrashing(graph: onnx.GraphProto, findings: list[Finding]) -> None:

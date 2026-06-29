@@ -11,10 +11,6 @@ from pydantic_settings import BaseSettings, CliApp, CliPositionalArg
 
 from onnx_speedup.diagnose import graph_analyzer, profile_analyzer, shape_analyzer
 from onnx_speedup.passes.base import Pass, PassResult
-from onnx_speedup.passes.eliminate_cast import EliminateCastPass
-from onnx_speedup.passes.fuse_gelu import FuseGeluPass
-from onnx_speedup.passes.fuse_gemm import FuseGemmPass
-from onnx_speedup.passes.fuse_layernorm import FuseLayerNormPass
 from onnx_speedup.passes.onnxslim_pass import OnnxSlimPass
 from onnx_speedup.passes.ort_offline import OrtOfflinePass
 from onnx_speedup.report.report import PipelineResult
@@ -25,10 +21,6 @@ __version__ = "0.1.0"
 
 _PASS_PIPELINE: list[Pass] = [
     OnnxSlimPass(),
-    EliminateCastPass(),
-    FuseGemmPass(),
-    FuseGeluPass(),
-    FuseLayerNormPass(),
     OrtOfflinePass(),
 ]
 
