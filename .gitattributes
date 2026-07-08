@@ -1,0 +1,1 @@
+examples/mnist/checkpoints/*.ckpt filter=lfs diff=lfs merge=lfs -text
