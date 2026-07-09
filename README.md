@@ -150,7 +150,7 @@ once you have an environment (e.g. Linux) where it actually imports.
 ## Example: MNIST end to end
 
 `examples/mnist/` trains a real model (Conv/BatchNorm/residual stem, self-attention +
-MLP block, ~39K params — deliberately covering Conv2d, BatchNorm2d, MaxPool2d,
+MLP block, ~2.0M params — deliberately covering Conv2d, BatchNorm2d, MaxPool2d,
 AdaptiveAvgPool2d, residual Add, Dropout, LayerNorm, Linear, SDPA, ReLU, GELU) with
 Lightning, checkpoints it via git-lfs, then quantizes it with real calibration data and
 prints a full `QuantizationReport`:
@@ -162,9 +162,11 @@ uv run python train.py           # trains, saves checkpoints/mnist_net.ckpt
 uv run python quantize_mnist.py  # quantizes + prints the report
 ```
 
-Last run: fp32 98.08% accuracy → int8 97.92% (0.16pp drop), 1.24x size reduction (modest
-because the model is small enough that QDQ node/scale overhead eats into the savings —
-this improves substantially on models with more real weight mass).
+The model is sized at ~2.0M params on purpose, so quantization has real weight mass to
+compress. Last run: fp32 98.97% accuracy → int8 98.92% (0.05pp drop), 3.74x size reduction
+(8.15 MB → 2.18 MB) — far better than a tiny model's, whose savings get swamped by
+per-tensor QDQ node/scale overhead. The checkpoint is architecture-specific, so retrain with
+`train.py` after any change to the model, then re-run `quantize_mnist.py`.
 
 ## This is a demo, not a package
 

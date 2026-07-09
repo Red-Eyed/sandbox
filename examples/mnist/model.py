@@ -11,7 +11,7 @@ class MNISTNet(nn.Module):
     quantization pipeline gets exercised against more than a toy Linear-only model.
     """
 
-    def __init__(self, num_classes: int = 10, embed_dim: int = 32, num_heads: int = 4):
+    def __init__(self, num_classes: int = 10, embed_dim: int = 256, num_heads: int = 8):
         super().__init__()
         self.conv1 = nn.Conv2d(1, 16, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(16)

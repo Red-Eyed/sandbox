@@ -20,7 +20,7 @@ NUM_CLASSES = 10
 
 def load_test_loader(batch_size: int = 64) -> DataLoader:
     tfm = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])
-    test_set = MNIST(str(HERE / "data"), train=False, transform=tfm)
+    test_set = MNIST(str(HERE / "data"), train=False, transform=tfm, download=True)
     return DataLoader(test_set, batch_size=batch_size)
 
 
