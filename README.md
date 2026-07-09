@@ -17,35 +17,69 @@ graph into ONNX QDQ nodes.
 
 ## Usage
 
+Subclass `QuantizationPipeline`, implement the two required hooks, and call `run()`:
+
 ```python
-import torch
 from torch import nn
 
-from torchquant import Pt2eQuantizationConfig, quantize_torch_model
+from torchquant import QuantizationPipeline
 
-model = MyModel().eval()
-example_args = (torch.randn(2, 3, 224, 224),)
-# Needed for anything but a fixed batch size — see "Dynamic shapes" below.
-dynamic_shapes = ({0: torch.export.Dim("batch")},)
+class MyPipeline(QuantizationPipeline):
+    def __init__(self, model: nn.Module, loader) -> None:
+        self.model = model
+        self.loader = loader
 
-def calibrate(prepared: nn.Module) -> None:
-    for batch in my_calibration_loader():
-        prepared(batch)
+    def get_model(self) -> nn.Module:
+        return self.model
 
-quantize_torch_model(
-    model, example_args, calibrate, "model_int8.onnx",
-    config=Pt2eQuantizationConfig.static_per_channel(),
-    dynamic_shapes=dynamic_shapes,
-)
+    def get_calibration_batches(self):
+        # a *fresh* iterable of input tuples each call (a generator over a DataLoader is ideal)
+        return ((images,) for images, _ in self.loader)
+
+result = MyPipeline(MyModel().eval(), my_loader).run("out/")
+print(result.report.to_markdown())
 ```
 
-`calibrate` is a closure you supply — it owns the calibration dataset and loop, so this
-library never needs to know your data's shape or source.
+`run()` exports the fp32 baseline, PT2E-quantizes + exports the int8 model, and builds a
+report comparing the two — returning a `QuantizationRunResult` with the `report`, both ONNX
+paths, and optional fp32/int8 scores. There's no `__init__` on the base, so your subclass
+takes whatever it needs (a live model, a checkpoint path, a loader) and the `get_*` hooks
+just surface it. The pipeline never learns your data's shape or source — you hand it inputs
+and it owns the loop, the export, and the naming.
+
+## Hooks
+
+`run()` is a thin orchestrator: every step is a method with a sane default, so you change
+behavior by overriding one small method, never `run()` itself. Only `get_model` and
+`get_calibration_batches` are required.
+
+**Input hooks** — feed different data or knobs:
+
+| hook | default |
+|---|---|
+| `get_model()` | *(required)* the module to quantize |
+| `get_calibration_batches()` | *(required)* fresh iterable of input tuples |
+| `get_example_args()` | first calibration batch (the trace input) |
+| `get_config()` | `Pt2eQuantizationConfig.static_per_channel()` |
+| `get_dynamic_shapes()` | `None` |
+| `get_export_options()` | `OnnxExportOptions()` — opset, embed-weights |
+| `get_parity_batches()` | reuse calibration data |
+| `get_output_basename()` | `"model"` |
+| `get_num_calibration_batches()` / `get_num_parity_batches()` | `20` / `10` |
+| `evaluate(onnx_path)` | `None` — override to score accuracy |
+
+**Step hooks** — swap the mechanics: `resolve_output_paths`, `export_fp32`,
+`export_quantized`, `calibrate`, `read_input_names`, `build_parity_samples`, `build_report`,
+`build_result`. E.g. override `export_fp32` / `export_quantized` to change the opset or the
+export target itself.
+
+**Lifecycle hooks** — observe a run: `on_run_start`, `on_model_exported(kind, path)`,
+`on_run_end(result)`.
 
 ## Presets
 
-`Pt2eQuantizationConfig` has four named constructors, covering the two real axes
-XNNPACKQuantizer exposes:
+`get_config()` returns a `Pt2eQuantizationConfig`, which has four named constructors
+covering the two real axes XNNPACKQuantizer exposes:
 
 - `static_per_channel()` — default; per-channel weight scales, best accuracy.
 - `static_per_tensor()` — one weight scale per tensor, for backends without per-channel kernels.
@@ -54,21 +88,22 @@ XNNPACKQuantizer exposes:
 
 ## Dynamic shapes
 
-`torch.export.export` guards on the exact shape of `example_args` by default. Any
+`torch.export.export` guards on the exact shape of the trace input by default. Any
 calibration or inference batch of a different size — including a real `DataLoader`'s
 uneven trailing batch — raises a guard-failure error unless you mark the batch dim
-dynamic via `dynamic_shapes`. Two gotchas found the hard way:
+dynamic via `get_dynamic_shapes()`. Two gotchas found the hard way:
 
-- `dynamic_shapes` must be passed to `quantize_torch_model` itself, not just implied by
-  `example_args` — it's forwarded to *both* the PT2E export step and the final ONNX
+- `get_dynamic_shapes()` is forwarded to *both* the PT2E export step and the final ONNX
   export, since the ONNX graph re-guards independently otherwise.
-- Use an example batch size of 2, not 1: torch's 0/1-specialization quirk silently treats
-  a dim of size 1 as static even when marked dynamic.
+- The trace input needs a batch dim > 1: torch's 0/1-specialization quirk silently treats
+  a dim of size 1 as static even when marked dynamic. `get_example_args()` defaults to the
+  first calibration batch, so this only bites when that batch is size 1 — override it to
+  return a size-2 example then.
 
 ## Reports
 
-`build_report(fp32_model, int8_model, config, parity_samples)` returns a
-`QuantizationReport` (`.to_markdown()` / `.to_json_str()`) covering:
+`run()` returns a `QuantizationRunResult`; its `.report` is a `QuantizationReport`
+(`.to_markdown()` / `.to_json_str()`) covering:
 
 - **Size** — fp32 vs int8 byte size and the reduction ratio.
 - **Parity** — per-output max/mean absolute diff over real samples. The fp32 and int8

@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from pathlib import Path
 from typing import cast
 
@@ -11,10 +12,10 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import MNIST
 
-from torchquant import DynamicShapes, Pt2eQuantizationConfig, build_report, quantize_torch_model
+from torchquant import DynamicShapes, QuantizationPipeline
 
 HERE = Path(__file__).parent
-NUM_CALIBRATION_BATCHES = 20
+NUM_CLASSES = 10
 
 
 def load_test_loader(batch_size: int = 64) -> DataLoader:
@@ -23,10 +24,10 @@ def load_test_loader(batch_size: int = 64) -> DataLoader:
     return DataLoader(test_set, batch_size=batch_size)
 
 
-def onnx_accuracy(onnx_path: Path, loader: DataLoader, num_classes: int = 10) -> float:
+def onnx_accuracy(onnx_path: Path, loader: DataLoader) -> float:
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
-    metric = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+    metric = torchmetrics.Accuracy(task="multiclass", num_classes=NUM_CLASSES)
     for images, labels in loader:
         # session.run() is typed to also allow SparseTensor/dict/list outputs (ONNX's
         # sequence/map types); this model only has a dense tensor output, so the cast
@@ -36,72 +37,39 @@ def onnx_accuracy(onnx_path: Path, loader: DataLoader, num_classes: int = 10) ->
     return metric.compute().item()
 
 
-def load_trained_model(checkpoint_path: Path) -> nn.Module:
-    lit_model = LitMNISTNet.load_from_checkpoint(str(checkpoint_path), map_location="cpu")
-    return lit_model.net.eval()
+class MnistQuantizationPipeline(QuantizationPipeline):
+    def __init__(self, checkpoint_path: Path, loader: DataLoader) -> None:
+        self.checkpoint_path = checkpoint_path
+        self.loader = loader
 
+    def get_output_basename(self) -> str:
+        return "mnist_net"
 
-def export_fp32_baseline(
-    model: nn.Module,
-    example_args: tuple[torch.Tensor, ...],
-    dynamic_shapes: DynamicShapes,
-    output_path: Path,
-) -> None:
-    torch.onnx.export(
-        model,
-        example_args,
-        str(output_path),
-        dynamo=True,
-        external_data=False,
-        dynamic_shapes=dynamic_shapes,
-    )
+    def get_model(self) -> nn.Module:
+        lit_model = LitMNISTNet.load_from_checkpoint(str(self.checkpoint_path), map_location="cpu")
+        return lit_model.net.eval()
 
+    def get_dynamic_shapes(self) -> DynamicShapes:
+        return ({0: torch.export.Dim("batch")},)
 
-def make_parity_samples(
-    loader: DataLoader, input_name: str, num_batches: int = 10
-) -> list[dict[str, np.ndarray]]:
-    samples = []
-    for i, (images, _) in enumerate(loader):
-        if i >= num_batches:
-            break
-        samples.append({input_name: images.numpy()})
-    return samples
+    def get_calibration_batches(self) -> Iterable[tuple[torch.Tensor, ...]]:
+        return ((images,) for images, _ in self.loader)
+
+    def evaluate(self, onnx_path: Path) -> float:
+        return onnx_accuracy(onnx_path, self.loader)
 
 
 def main() -> None:
-    model = load_trained_model(HERE / "checkpoints" / "mnist_net.ckpt")
-    test_loader = load_test_loader()
+    loader = load_test_loader()
+    pipeline = MnistQuantizationPipeline(HERE / "checkpoints" / "mnist_net.ckpt", loader)
+    result = pipeline.run(HERE / "checkpoints")
 
-    # Batch size 2, not 1: torch.export's 0/1-specialization quirk silently treats a
-    # dim of size 1 in the example as static even when marked dynamic. A real DataLoader's
-    # uneven trailing batch means the batch dim must be dynamic regardless.
-    example_args = (torch.randn(2, 1, 28, 28),)
-    dynamic_shapes = ({0: torch.export.Dim("batch")},)
-
-    def calibrate(prepared: nn.Module) -> None:
-        for i, (images, _) in enumerate(test_loader):
-            if i >= NUM_CALIBRATION_BATCHES:
-                break
-            prepared(images)
-
-    config = Pt2eQuantizationConfig.static_per_channel()
-    int8_path = HERE / "checkpoints" / "mnist_net_int8.onnx"
-    quantize_torch_model(
-        model, example_args, calibrate, int8_path, config=config, dynamic_shapes=dynamic_shapes
-    )
-
-    fp32_path = HERE / "checkpoints" / "mnist_net_fp32.onnx"
-    export_fp32_baseline(model, example_args, dynamic_shapes, fp32_path)
-
-    int8_session = ort.InferenceSession(str(int8_path), providers=["CPUExecutionProvider"])
-    input_name = int8_session.get_inputs()[0].name
-    parity_samples = make_parity_samples(test_loader, input_name)
-    report = build_report(fp32_path, int8_path, config, parity_samples)
-
-    print(report.to_markdown())
+    print(result.report.to_markdown())
     print()
-    print(f"fp32 accuracy: {onnx_accuracy(fp32_path, test_loader):.4f}")
-    print(f"int8 accuracy: {onnx_accuracy(int8_path, test_loader):.4f}")
+    if result.fp32_score is not None:
+        print(f"fp32 accuracy: {result.fp32_score:.4f}")
+    if result.int8_score is not None:
+        print(f"int8 accuracy: {result.int8_score:.4f}")
 
 
 if __name__ == "__main__":
